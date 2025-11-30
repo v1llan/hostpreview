@@ -130,7 +130,6 @@ async def preview_proxy(preview_id: str, full_path: str = "", request: Request =
                     content = raw_content
                 status_code = resp.status_code
                 response_headers_dict = dict(resp.headers)
-            # Remove blocked headers that break asset loading / iframes
             excluded_headers = [
                 "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
                 "trailers", "upgrade", "transfer-encoding", "content-encoding", "content-length",
@@ -147,7 +146,6 @@ async def preview_proxy(preview_id: str, full_path: str = "", request: Request =
             content_type = response_headers_dict.get("content-type")
             preview_prefix = f"/preview/{preview_id}/"
             charset = resp.encoding if getattr(resp, "encoding", None) else "utf-8"
-            # === FIXED ASSET REWRITE LOGIC ===
             if content_type:
                 lower_type = content_type.lower()
                 if "text/html" in lower_type:
@@ -163,39 +161,48 @@ async def preview_proxy(preview_id: str, full_path: str = "", request: Request =
                                     url = tag.attrs[attr]
                                     if isinstance(url, str):
                                         try:
-                                            # Protocol-relative //foo.bar (leave as is or force https)
+                                            # Protocol-relative URLs (e.g., //example.com)
                                             if url.startswith("//"):
                                                 tag.attrs[attr] = "https:" + url
                                                 continue
-                                            # External URLs (e.g., /domain.com/...): rewrite to https
-                                            if re.match(r"^/[a-zA-Z0-9\-.]+\.[a-z]{2,}(/|$)", url):
-                                                tag.attrs[attr] = "https://" + url.lstrip("/")
-                                                continue
-                                            # Root-relative paths
+                                            # Absolute paths (e.g., /images/logo.png)
                                             if url.startswith("/") and not url.startswith("/preview/"):
                                                 tag.attrs[attr] = preview_prefix + url.lstrip("/")
+                                                continue
+                                            # Avoid rewriting non-URL attributes like width
+                                            if attr not in ["src", "href", "action", "poster", "data", "content"]:
+                                                continue
+                                            # Relative paths (e.g., images/logo.png)
+                                            if not url.startswith("http") and not url.startswith("/"):
+                                                tag.attrs[attr] = preview_prefix + url
+                                                continue
+                                            # Ensure query parameters are preserved
+                                            if "?" in url:
+                                                base_url, query = url.split("?", 1)
+                                                if base_url.startswith("/"):
+                                                    tag.attrs[attr] = preview_prefix + base_url.lstrip("/") + "?" + query
                                         except Exception as e:
-                                            pass  # Log or handle specific URL parsing errors
+                                            logger.warning(f"Failed to rewrite URL {url}: {str(e)}")
                         for style_tag in soup.find_all("style"):
                             if style_tag.string:
                                 try:
                                     style_tag.string = rewrite_css_urls(style_tag.string, preview_prefix)
                                 except Exception as e:
-                                    pass  # Log or handle specific CSS parsing errors
+                                    logger.warning(f"Failed to rewrite CSS in <style>: {str(e)}")
                         for tag in soup.find_all(style=True):
                             try:
                                 tag['style'] = rewrite_css_urls(tag['style'], preview_prefix)
                             except Exception as e:
-                                pass  # Log or handle specific inline style errors
+                                logger.warning(f"Failed to rewrite inline style: {str(e)}")
                         content = soup.encode(charset)
                     except Exception as ex:
-                        pass
+                        logger.error(f"Error processing HTML content: {str(ex)}")
                 elif "text/css" in lower_type:
                     try:
                         css_text = content.decode(charset, errors="ignore")
                         content = rewrite_css_urls(css_text, preview_prefix).encode(charset)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.error(f"Error processing CSS content: {str(e)}")
             response_headers["content-length"] = str(len(content))
             return Response(
                 content=content,
